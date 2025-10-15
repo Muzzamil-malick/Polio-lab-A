@@ -1,12 +1,10 @@
-# attendance_app.py
+# app.py
 import io
 import math
-from datetime import datetime, timedelta, date
-from dateutil.relativedelta import relativedelta
 import calendar
-
-import pandas as pd
+from datetime import datetime, date
 import numpy as np
+import pandas as pd
 import streamlit as st
 import plotly.express as px
 
@@ -14,92 +12,83 @@ import plotly.express as px
 # ---------- Utilities ----------
 # -------------------------------
 
-def parse_hhmm(hhmm: str):
+def _parse_hhmm(x: str):
     try:
-        return datetime.strptime(hhmm.strip(), "%H:%M").time()
+        return datetime.strptime(x.strip(), "%H:%M").time()
     except Exception:
         return None
 
 def calculate_hours_minutes_str(check_in_out: str):
     """
-    Input example: "09:00-17:30"
-    Returns: "8h 30m" (string) or None
-    Handles overnight by adding 24h if negative diff.
+    "09:00-17:30" -> "8h 30m"
+    Handles overnight spans by +24h if negative.
     """
     if check_in_out is None or (isinstance(check_in_out, float) and math.isnan(check_in_out)):
         return None
-    if not isinstance(check_in_out, str) or check_in_out.strip() == "":
+    if not isinstance(check_in_out, str) or not check_in_out.strip():
         return None
-
     parts = check_in_out.split("-")
     if len(parts) != 2:
         return None
-    ci = parse_hhmm(parts[0])
-    co = parse_hhmm(parts[1])
+    ci, co = _parse_hhmm(parts[0]), _parse_hhmm(parts[1])
     if ci is None or co is None:
         return None
 
-    ci_dt = datetime.combine(date(2000, 1, 1), ci)
-    co_dt = datetime.combine(date(2000, 1, 1), co)
+    base = date(2000, 1, 1)
+    ci_dt = datetime.combine(base, ci)
+    co_dt = datetime.combine(base, co)
     diff = (co_dt - ci_dt).total_seconds()
     if diff < 0:
-        diff += 86400  # overnight wrap
+        diff += 86400
     if diff <= 0:
         return None
 
-    hours = int(diff // 3600)
-    minutes = int(round((diff % 3600) / 60.0))
-    # Normalize 60m -> +1h
-    if minutes == 60:
-        hours += 1
-        minutes = 0
-    return f"{hours}h {minutes}m"
+    h = int(diff // 3600)
+    m = int(round((diff % 3600) / 60.0))
+    if m == 60:
+        h += 1
+        m = 0
+    return f"{h}h {m}m"
 
 def calculate_decimal_hours(check_in_out: str):
     """
-    Returns decimal hours (float) or np.nan
+    "09:00-17:30" -> 8.5 (float) or np.nan
     """
     if check_in_out is None or (isinstance(check_in_out, float) and math.isnan(check_in_out)):
         return np.nan
-    if not isinstance(check_in_out, str) or check_in_out.strip() == "":
+    if not isinstance(check_in_out, str) or not check_in_out.strip():
         return np.nan
-
     parts = check_in_out.split("-")
     if len(parts) != 2:
         return np.nan
-    ci = parse_hhmm(parts[0])
-    co = parse_hhmm(parts[1])
+    ci, co = _parse_hhmm(parts[0]), _parse_hhmm(parts[1])
     if ci is None or co is None:
         return np.nan
 
-    ci_dt = datetime.combine(date(2000, 1, 1), ci)
-    co_dt = datetime.combine(date(2000, 1, 1), co)
+    base = date(2000, 1, 1)
+    ci_dt = datetime.combine(base, ci)
+    co_dt = datetime.combine(base, co)
     diff = (co_dt - ci_dt).total_seconds()
     if diff < 0:
         diff += 86400
     if diff <= 0:
         return np.nan
-
     return round(diff / 3600.0, 2)
 
-def month_date_range(year: int, month: int):
-    start = date(year, month, 1)
-    _, last_day = calendar.monthrange(year, month)
-    end = date(year, month, last_day)
-    return start, end
+def month_range(year: int, month: int):
+    first = date(year, month, 1)
+    last = calendar.monthrange(year, month)[1]
+    return first, date(year, month, last)
 
 def is_working_day(d: date):
-    # Monday=0, Sunday=6 -> Working days: Mon–Fri
-    return d.weekday() in (0, 1, 2, 3, 4)
+    # Mon–Fri only (to match wday %in% 2:6 intent)
+    return d.weekday() < 5
 
 def safe_str(x):
-    if pd.isna(x):
-        return ""
-    return str(x)
-
+    return "" if pd.isna(x) else str(x)
 
 # -------------------------------
-# ---------- Page Style ---------
+# ---------- Page Setup ---------
 # -------------------------------
 st.set_page_config(
     page_title="Employee Attendance Dashboard",
@@ -107,15 +96,12 @@ st.set_page_config(
     layout="wide",
 )
 
-# Simple CSS to echo your Shiny theme vibe
 st.markdown("""
 <style>
-.reportview-container, .main, .block-container {
-    background-color: #f5f7fa !important;
-}
+.reportview-container, .main, .block-container { background-color: #f5f7fa !important; }
 .download-btn {
-    background: #007bff; color: white; border-radius: 8px; padding: 0.5rem 0.85rem;
-    text-decoration: none; font-weight: 600;
+  background: #007bff; color: white; border-radius: 8px; padding: 0.5rem 0.9rem;
+  text-decoration: none; font-weight: 600;
 }
 .download-btn:hover { background: #0056b3; color: white; }
 </style>
@@ -130,14 +116,12 @@ st.sidebar.header("Upload Files")
 attendance_file = st.sidebar.file_uploader("Select Attendance Excel File (.xlsx)", type=["xlsx"])
 section_file = st.sidebar.file_uploader("Select Section Details File (.xlsx)", type=["xlsx"])
 
-this_year = datetime.now().year
-month = st.sidebar.selectbox("Month", options=list(range(1, 13)),
-                             index=min(datetime.now().month-1, 11),
+month = st.sidebar.selectbox("Month:", list(range(1, 12+1)), index=(datetime.now().month-1),
                              format_func=lambda m: calendar.month_name[m])
-year = st.sidebar.selectbox("Year", options=list(range(2020, 2027)),
-                            index=list(range(2020, 2027)).index(min(this_year, 2026)))
+year = st.sidebar.selectbox("Year:", list(range(2020, 2027)),
+                            index=list(range(2020, 2027)).index(min(datetime.now().year, 2026)))
 
-st.success("Upload both Excel files (attendance & section mapping). Then open ‘Section Summary’ or ‘Employee Report’ tabs.")
+st.success("Upload both Excel files (attendance & section mapping). Then open 'Section Summary' or 'Employee Report'.")
 
 # -------------------------------
 # ---------- Data Load ----------
@@ -146,17 +130,13 @@ st.success("Upload both Excel files (attendance & section mapping). Then open �
 def load_attendance(file):
     df = pd.read_excel(file, engine="openpyxl")
     df = df.copy()
-    # Force first two columns names to match R code behavior
     cols = list(df.columns)
-    if len(cols) >= 1:
-        cols[0] = "Sr.NO"
-    if len(cols) >= 2:
-        cols[1] = "First.Name"
+    if len(cols) >= 1: cols[0] = "Sr.NO"
+    if len(cols) >= 2: cols[1] = "First.Name"
     if len(cols) > 2:
         for i in range(2, len(cols)):
             cols[i] = f"X{(i-1):02d}"  # X01..Xnn
     df.columns = cols
-    # ensure First.Name is string
     if "First.Name" in df.columns:
         df["First.Name"] = df["First.Name"].astype(str)
     return df
@@ -165,47 +145,42 @@ def load_attendance(file):
 def load_sections(file):
     df = pd.read_excel(file, engine="openpyxl")
     df = df.copy()
-    # Expect exactly two columns: First.Name, Section
-    if len(df.columns) >= 2:
-        df.columns = ["First.Name", "Section"] + list(df.columns[2:])
-    else:
+    if len(df.columns) < 2:
         raise ValueError("Section file must have at least two columns: First.Name, Section")
+    df.columns = ["First.Name", "Section"] + list(df.columns[2:])
     df["First.Name"] = df["First.Name"].astype(str)
     return df[["First.Name", "Section"]]
 
-def merge_data(att_df: pd.DataFrame, sec_df: pd.DataFrame):
+def merge_frames(att_df, sec_df):
     return att_df.merge(sec_df, on="First.Name", how="left")
 
-# Try to load
 att_df = load_attendance(attendance_file) if attendance_file else None
 sec_df = load_sections(section_file) if section_file else None
-merged_df = merge_data(att_df, sec_df) if (att_df is not None and sec_df is not None) else None
+merged_df = merge_frames(att_df, sec_df) if (att_df is not None and sec_df is not None) else None
 
-start_date, end_date = month_date_range(year, month)
+start_date, end_date = month_range(year, month)
 days = pd.date_range(start=start_date, end=end_date, freq="D")
 day_cols = [f"X{d.day:02d}" for d in days]
 
-
 # -------------------------------
-# -------- Tabs (like Shiny) ----
+# ---------- Tabs ---------------
 # -------------------------------
 tab_upload, tab_summary, tab_employee = st.tabs(["Upload Files", "Section Summary", "Employee Report"])
 
 with tab_upload:
     st.subheader("Files")
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         if att_df is not None:
             st.caption("Attendance (first 10 rows)")
             st.dataframe(att_df.head(10), use_container_width=True)
-    with col2:
+    with c2:
         if sec_df is not None:
             st.caption("Section Map (first 10 rows)")
             st.dataframe(sec_df.head(10), use_container_width=True)
 
 with tab_summary:
     st.subheader("Section Summary")
-
     if merged_df is None or merged_df.empty:
         st.info("Upload both files to see Section Summary.")
     else:
@@ -213,31 +188,25 @@ with tab_summary:
         if not sections:
             st.warning("No sections found in mapping.")
         else:
-            section_choice = st.selectbox("Choose Section", options=sections)
+            section_choice = st.selectbox("Choose Section:", sections)
             emp_data = merged_df.loc[merged_df["Section"] == section_choice].copy()
 
             if emp_data.empty:
                 st.warning("No employees in this section for the selected month/year.")
             else:
-                # Compute summary per employee
-                records = []
-                # total working days/hours (Mon–Fri)
                 working_days = sum(is_working_day(d.date()) for d in days)
                 total_working_hours = working_days * 8
 
+                records = []
                 for emp in emp_data["First.Name"].unique():
                     row = emp_data.loc[emp_data["First.Name"] == emp].head(1)
-                    vals = []
-                    for col in day_cols:
-                        vals.append(safe_str(row[col].values[0]) if col in row.columns else "")
-
-                    # Only keep non-empty
-                    vals = [v for v in vals if v not in (None, "", "nan")]
+                    vals = [safe_str(row[col].values[0]) if col in row.columns else "" for col in day_cols]
+                    vals = [v for v in vals if v]
                     hours_vec = [calculate_decimal_hours(v) for v in vals]
                     hours_vec = [h for h in hours_vec if not pd.isna(h)]
+
                     total_hours = round(sum(hours_vec), 2) if hours_vec else 0.0
                     total_days_present = len(hours_vec)
-
                     perc = round((total_hours / total_working_hours) * 100, 2) if total_working_hours > 0 else 0.0
                     status = "⚠️ Below Target" if perc < 80 else "✅ Satisfactory"
 
@@ -252,55 +221,39 @@ with tab_summary:
                 summary_df = pd.DataFrame(records).sort_values("Percentage_Worked", ascending=False)
                 st.dataframe(summary_df, use_container_width=True)
 
-                # Plot (like ggplot col chart)
-                fig = px.bar(
-                    summary_df.sort_values("Percentage_Worked"),
-                    x="Percentage_Worked",
-                    y="Employee",
-                    orientation="h",
-                    title="Section Attendance Overview",
-                    text="Percentage_Worked"
-                )
+                # Bar chart (ggplot-like)
+                plot_df = summary_df.sort_values("Percentage_Worked")
+                fig = px.bar(plot_df, x="Percentage_Worked", y="Employee",
+                             orientation="h", title="Section Attendance Overview",
+                             text="Percentage_Worked", color="Percentage_Worked",
+                             color_continuous_scale=["#ff6666", "#33cc33"])
                 fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-                fig.update_layout(
-                    xaxis_title="Attendance %",
-                    yaxis_title="Employee",
-                    margin=dict(l=10, r=10, t=50, b=10),
-                    height=450
-                )
+                fig.update_layout(xaxis_title="Attendance %", yaxis_title="Employee",
+                                  margin=dict(l=10, r=10, t=50, b=10), height=420,
+                                  coloraxis_showscale=False)
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab_employee:
     st.subheader("Employee Report")
-
     if merged_df is None or merged_df.empty:
         st.info("Upload both files to see Employee Report.")
     else:
-        # Build the same section summary to get employees list
         employees = sorted(merged_df["First.Name"].dropna().unique())
         if not employees:
             st.warning("No employees found.")
         else:
-            emp_choice = st.selectbox("Choose Employee", options=employees)
+            emp_choice = st.selectbox("Choose Employee:", employees)
 
-            # Build detailed daily table for selected employee
-            emp_row = merged_df.loc[merged_df["First.Name"] == emp_choice]
+            emp_row = merged_df.loc[merged_df["First.Name"] == emp_choice].head(1)
             if emp_row.empty:
                 st.warning("No data for this employee.")
             else:
-                # Single row expected
-                emp_row = emp_row.head(1)
-                detailed = pd.DataFrame({
-                    "Date": pd.to_datetime(days.date),
-                })
-                times = []
-                hours_str = []
-                dec_hours = []
-
+                detailed = pd.DataFrame({"Date": pd.to_datetime(days.date)})
+                times, hours_str, dec_hours = [], [], []
                 for d in detailed["Date"]:
                     col = f"X{d.day:02d}"
                     val = safe_str(emp_row[col].values[0]) if col in emp_row.columns else ""
-                    val = None if val.strip() == "" else val
+                    val = None if (val is None or val.strip() == "") else val
                     times.append(val)
                     hours_str.append(calculate_hours_minutes_str(val))
                     dec_hours.append(calculate_decimal_hours(val))
@@ -308,11 +261,12 @@ with tab_employee:
                 detailed["Time"] = times
                 detailed["Hours"] = hours_str
                 detailed["DecimalHours"] = dec_hours
-                # Week number within month: Week-1 … Week-5 (ceiling of day/7)
-                detailed["Week"] = detailed["Date"].dt.day.apply(lambda d: f"Week-{math.ceil(d/7)}")
-                detailed["WorkingDay"] = detailed["Date"].dt.day_name().isin(["Monday","Tuesday","Wednesday","Thursday","Friday"])
+                detailed["Week"] = detailed["Date"].dt.day.apply(lambda dd: f"Week-{math.ceil(dd/7)}")
+                detailed["WorkingDay"] = detailed["Date"].dt.day_name().isin(
+                    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+                )
 
-                # Weekly summary (Mon–Fri only)
+                # Weekly summary (Mon–Fri)
                 wk = (
                     detailed.loc[detailed["WorkingDay"]]
                     .groupby("Week", as_index=False)
@@ -335,12 +289,11 @@ with tab_employee:
                 st.dataframe(wk_disp, use_container_width=True)
 
                 st.markdown("### Detailed Daily Attendance")
-                # Nice tidy display
                 show = detailed.copy()
                 show["Date"] = show["Date"].dt.date
                 st.dataframe(show[["Date", "Time", "Hours", "DecimalHours", "Week"]], use_container_width=True)
 
-                # Download full employee report CSV
+                # Download CSV
                 out = io.StringIO()
                 show.to_csv(out, index=False)
                 st.download_button(
