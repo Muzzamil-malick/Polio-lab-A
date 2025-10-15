@@ -9,9 +9,25 @@ import streamlit as st
 import plotly.express as px
 
 # -------------------------------
-# ---------- Utilities ----------
+# ---------- Theme Utils --------
 # -------------------------------
+def detect_base_theme():
+    """Try to read Streamlit theme; fallback to 'light'."""
+    base = st.get_option("theme.base")
+    if isinstance(base, str) and base.lower() in ("dark", "light"):
+        return base.lower()
+    return "light"
 
+def pick_plotly_template(effective_theme: str):
+    return "plotly_dark" if effective_theme == "dark" else "plotly"
+
+def pick_color_scale(effective_theme: str):
+    # Good in both modes; readable contrasts
+    return "RdYlGn"
+
+# -------------------------------
+# ---------- Time Utils ---------
+# -------------------------------
 def _parse_hhmm(x: str):
     try:
         return datetime.strptime(x.strip(), "%H:%M").time()
@@ -19,10 +35,6 @@ def _parse_hhmm(x: str):
         return None
 
 def calculate_hours_minutes_str(check_in_out: str):
-    """
-    "09:00-17:30" -> "8h 30m"
-    Handles overnight spans by +24h if negative.
-    """
     if check_in_out is None or (isinstance(check_in_out, float) and math.isnan(check_in_out)):
         return None
     if not isinstance(check_in_out, str) or not check_in_out.strip():
@@ -39,21 +51,17 @@ def calculate_hours_minutes_str(check_in_out: str):
     co_dt = datetime.combine(base, co)
     diff = (co_dt - ci_dt).total_seconds()
     if diff < 0:
-        diff += 86400
+        diff += 86400  # overnight
     if diff <= 0:
         return None
 
     h = int(diff // 3600)
     m = int(round((diff % 3600) / 60.0))
     if m == 60:
-        h += 1
-        m = 0
+        h += 1; m = 0
     return f"{h}h {m}m"
 
 def calculate_decimal_hours(check_in_out: str):
-    """
-    "09:00-17:30" -> 8.5 (float) or np.nan
-    """
     if check_in_out is None or (isinstance(check_in_out, float) and math.isnan(check_in_out)):
         return np.nan
     if not isinstance(check_in_out, str) or not check_in_out.strip():
@@ -81,7 +89,7 @@ def month_range(year: int, month: int):
     return first, date(year, month, last)
 
 def is_working_day(d: date):
-    # Mon–Fri only (to match wday %in% 2:6 intent)
+    # Mon–Fri
     return d.weekday() < 5
 
 def safe_str(x):
@@ -90,46 +98,34 @@ def safe_str(x):
 # -------------------------------
 # ---------- Page Setup ---------
 # -------------------------------
-st.set_page_config(
-    page_title="Employee Attendance Dashboard",
-    page_icon="📊",
-    layout="wide",
-)
-
-st.markdown("""
-<style>
-.reportview-container, .main, .block-container { background-color: #f5f7fa !important; }
-.download-btn {
-  background: #007bff; color: white; border-radius: 8px; padding: 0.5rem 0.9rem;
-  text-decoration: none; font-weight: 600;
-}
-.download-btn:hover { background: #0056b3; color: white; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Employee Attendance Dashboard", page_icon="📊", layout="wide")
 
 st.title("Employee Attendance Dashboard")
 
-# -------------------------------
-# ---------- Sidebar ------------
-# -------------------------------
+# Sidebar: uploads + filters + theme
 st.sidebar.header("Upload Files")
 attendance_file = st.sidebar.file_uploader("Select Attendance Excel File (.xlsx)", type=["xlsx"])
 section_file = st.sidebar.file_uploader("Select Section Details File (.xlsx)", type=["xlsx"])
 
-month = st.sidebar.selectbox("Month:", list(range(1, 12+1)), index=(datetime.now().month-1),
+month = st.sidebar.selectbox("Month:", list(range(1, 13)), index=(datetime.now().month - 1),
                              format_func=lambda m: calendar.month_name[m])
 year = st.sidebar.selectbox("Year:", list(range(2020, 2027)),
                             index=list(range(2020, 2027)).index(min(datetime.now().year, 2026)))
 
-st.success("Upload both Excel files (attendance & section mapping). Then open 'Section Summary' or 'Employee Report'.")
+st.sidebar.markdown("---")
+theme_choice = st.sidebar.selectbox("Theme", ["Auto", "Light", "Dark"], index=0)
+base_theme = detect_base_theme() if theme_choice == "Auto" else theme_choice.lower()
+plotly_template = pick_plotly_template(base_theme)
+color_scale = pick_color_scale(base_theme)
+
+st.info("Upload both Excel files (attendance & section mapping). Then open 'Section Summary' or 'Employee Report'.")
 
 # -------------------------------
 # ---------- Data Load ----------
 # -------------------------------
 @st.cache_data(show_spinner=False)
 def load_attendance(file):
-    df = pd.read_excel(file, engine="openpyxl")
-    df = df.copy()
+    df = pd.read_excel(file, engine="openpyxl").copy()
     cols = list(df.columns)
     if len(cols) >= 1: cols[0] = "Sr.NO"
     if len(cols) >= 2: cols[1] = "First.Name"
@@ -143,8 +139,7 @@ def load_attendance(file):
 
 @st.cache_data(show_spinner=False)
 def load_sections(file):
-    df = pd.read_excel(file, engine="openpyxl")
-    df = df.copy()
+    df = pd.read_excel(file, engine="openpyxl").copy()
     if len(df.columns) < 2:
         raise ValueError("Section file must have at least two columns: First.Name, Section")
     df.columns = ["First.Name", "Section"] + list(df.columns[2:])
@@ -197,7 +192,7 @@ with tab_summary:
                 working_days = sum(is_working_day(d.date()) for d in days)
                 total_working_hours = working_days * 8
 
-                records = []
+                rows = []
                 for emp in emp_data["First.Name"].unique():
                     row = emp_data.loc[emp_data["First.Name"] == emp].head(1)
                     vals = [safe_str(row[col].values[0]) if col in row.columns else "" for col in day_cols]
@@ -210,7 +205,7 @@ with tab_summary:
                     perc = round((total_hours / total_working_hours) * 100, 2) if total_working_hours > 0 else 0.0
                     status = "⚠️ Below Target" if perc < 80 else "✅ Satisfactory"
 
-                    records.append({
+                    rows.append({
                         "Employee": emp,
                         "Days": f"{total_days_present} / {working_days}",
                         "Hours": f"{round(total_hours,1)} / {total_working_hours}",
@@ -218,19 +213,30 @@ with tab_summary:
                         "Status": status
                     })
 
-                summary_df = pd.DataFrame(records).sort_values("Percentage_Worked", ascending=False)
+                summary_df = pd.DataFrame(rows).sort_values("Percentage_Worked", ascending=False)
                 st.dataframe(summary_df, use_container_width=True)
 
-                # Bar chart (ggplot-like)
+                # Plot with theme-aware template
                 plot_df = summary_df.sort_values("Percentage_Worked")
-                fig = px.bar(plot_df, x="Percentage_Worked", y="Employee",
-                             orientation="h", title="Section Attendance Overview",
-                             text="Percentage_Worked", color="Percentage_Worked",
-                             color_continuous_scale=["#ff6666", "#33cc33"])
-                fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-                fig.update_layout(xaxis_title="Attendance %", yaxis_title="Employee",
-                                  margin=dict(l=10, r=10, t=50, b=10), height=420,
-                                  coloraxis_showscale=False)
+                fig = px.bar(
+                    plot_df,
+                    x="Percentage_Worked",
+                    y="Employee",
+                    orientation="h",
+                    title="Section Attendance Overview",
+                    text="Percentage_Worked",
+                    color="Percentage_Worked",
+                    color_continuous_scale=color_scale,
+                    template=plotly_template
+                )
+                fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside", cliponaxis=False)
+                fig.update_layout(
+                    xaxis_title="Attendance %",
+                    yaxis_title="Employee",
+                    margin=dict(l=10, r=10, t=50, b=10),
+                    height=420,
+                    coloraxis_showscale=False,
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab_employee:
@@ -266,7 +272,6 @@ with tab_employee:
                     ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
                 )
 
-                # Weekly summary (Mon–Fri)
                 wk = (
                     detailed.loc[detailed["WorkingDay"]]
                     .groupby("Week", as_index=False)
