@@ -17,9 +17,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from dash import Dash, dcc, html, Input, Output, State, dash_table, no_update
-import dash_bootstrap_components as dbc
-
 
 # ---- Polio clock constants ----
 VP1_LENGTH = 900
@@ -1442,3 +1439,4 @@ def download_district_pdf(n, store_parsed, dist_col, district_choice, year_choic
 if __name__ == "__main__":
     # Run: python app.py
     app.run_server(debug=True)
+
